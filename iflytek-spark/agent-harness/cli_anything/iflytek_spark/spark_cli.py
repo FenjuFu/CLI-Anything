@@ -253,6 +253,10 @@ def stream(ctx, words, prompt_opt, system, model_opt, temperature, top_p, max_to
         data = {"backend": settings["backend"], "model": result["model"], "content": result["content"]}
         if show_reasoning:
             data["reasoning"] = result["reasoning"]
+        if result.get("finish_reason"):
+            data["finish_reason"] = result["finish_reason"]
+        if result.get("usage"):
+            data["usage"] = result["usage"]
         output(data)
     else:
         click.echo()

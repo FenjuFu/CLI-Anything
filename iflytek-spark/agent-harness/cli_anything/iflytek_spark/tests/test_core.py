@@ -1,6 +1,8 @@
 """Unit tests for the Spark-X2.5 harness — no server required (HTTP is mocked)."""
 
 import json
+import os
+import stat
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,6 +10,7 @@ import requests
 from click.testing import CliRunner
 
 from cli_anything.iflytek_spark.core.session import ChatSession
+from cli_anything.iflytek_spark.core import session as session_module
 from cli_anything.iflytek_spark.spark_cli import cli
 from cli_anything.iflytek_spark.utils import spark_backend as backend
 from cli_anything.iflytek_spark.utils.spark_backend import (
@@ -111,6 +114,15 @@ class TestSettings:
         save_config({"backend": "vllm"})
         assert load_config() == {"backend": "vllm"}
         assert (isolated_home / "config.json").is_file()
+
+    @pytest.mark.parametrize("value", [None, [], 42, "text", True])
+    def test_non_object_config_falls_back(self, isolated_home, value):
+        (isolated_home / "config.json").write_text(json.dumps(value), encoding="utf-8")
+        assert load_config() == {}
+        assert resolve_settings()["backend"] == "sglang"
+        result = CliRunner().invoke(cli, ["--json", "config", "get"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {}
 
     def test_mask_secret(self):
         assert mask_secret("abcdefghijklmnop") == "abcdef..."
@@ -245,7 +257,8 @@ class TestRequests:
                 on_reasoning=lambda t: seen.__setitem__("r", seen["r"] + t),
                 on_content=lambda t: seen.__setitem__("c", seen["c"] + t),
             )
-        assert result == {"model": "spark2.5", "reasoning": "think more", "content": "Hefei"}
+        assert result == {"model": "spark2.5", "reasoning": "think more", "content": "Hefei",
+                          "finish_reason": None, "usage": {}}
         assert seen == {"r": "think more", "c": "Hefei"}
 
     def test_stream_prefilled(self):
@@ -255,18 +268,72 @@ class TestRequests:
         assert result["reasoning"] == "abc"
         assert result["content"] == "ok"
 
-    def test_stream_no_think_is_passthrough(self):
+    def test_stream_no_think_direct_answer(self):
         chunks = [{"choices": [{"delta": {"content": "direct answer"}}]}]
         with patch("requests.post", return_value=_sse_response(chunks)) as post:
             result = chat_completion_stream(resolve_settings(), [], thinking=False)
         assert result["content"] == "direct answer"
         assert post.call_args.kwargs["json"]["chat_template_kwargs"] == {"enable_thinking": False}
 
+    def test_stream_keeps_terminal_metadata_and_requests_usage(self):
+        usage = {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+        chunks = [
+            {"model": "served-spark", "choices": [{"delta": {"content": "ok"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": usage},
+        ]
+        with patch("requests.post", return_value=_sse_response(chunks)) as post:
+            result = chat_completion_stream(resolve_settings(), [])
+        assert result["model"] == "served-spark"
+        assert result["content"] == "ok"
+        assert result["finish_reason"] == "stop"
+        assert result["usage"] == usage
+        assert post.call_args.kwargs["json"]["stream_options"] == {"include_usage": True}
+
+    def test_stream_no_think_still_splits_backend_reasoning(self):
+        chunks = [{"choices": [{"delta": {"content": part}}]}
+                  for part in ["private reasoning</th", "ink>\n", "answer"]]
+        seen = {"reasoning": [], "content": []}
+        with patch("requests.post", return_value=_sse_response(chunks)):
+            result = chat_completion_stream(
+                resolve_settings(), [], thinking=False,
+                on_reasoning=seen["reasoning"].append,
+                on_content=seen["content"].append,
+            )
+        assert result["reasoning"] == "private reasoning"
+        assert result["content"] == "answer"
+        assert "".join(seen["content"]) == "answer"
+        assert "".join(seen["reasoning"]) == "private reasoning"
+
 
 # ── session ──────────────────────────────────────────────────────────
 
 
 class TestSession:
+    def test_session_creation_requests_private_mode(self, tmp_path):
+        target = str(tmp_path / "session.json")
+        with patch.object(session_module.os, "open", wraps=os.open) as open_file:
+            ChatSession(target).add_exchange("dummy prompt", "dummy answer")
+        assert open_file.call_args.args == (target, os.O_RDWR | os.O_CREAT, 0o600)
+
+    def test_existing_session_is_restricted_before_writing(self, tmp_path):
+        target = str(tmp_path / "session.json")
+        ChatSession(target).add_exchange("first", "answer")
+        operation = "fchmod" if hasattr(os, "fchmod") else "chmod"
+        with patch.object(session_module.os, operation, wraps=getattr(os, operation)) as chmod:
+            ChatSession(target).add_exchange("second", "answer")
+        assert chmod.call_args.args[-1] == 0o600
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions are not Windows ACLs")
+    @pytest.mark.parametrize("existing", [False, True])
+    def test_session_permissions_are_owner_only_on_posix(self, tmp_path, existing):
+        target = tmp_path / "session.json"
+        if existing:
+            target.write_text('{"messages": [], "history": []}', encoding="utf-8")
+            target.chmod(0o666)
+        ChatSession(str(target)).add_exchange("dummy prompt", "dummy answer")
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
     def test_exchange_persists(self, tmp_path):
         path = str(tmp_path / "s.json")
         s = ChatSession(path)
@@ -373,3 +440,19 @@ class TestCLI:
             result = CliRunner().invoke(cli, ["--json", "stream", "--no-session", "q"])
         assert result.exit_code == 0
         assert json.loads(result.output)["content"] == "done"
+
+    def test_stream_json_exposes_finish_reason_and_usage(self):
+        usage = {"total_tokens": 5}
+        chunks = [
+            {"choices": [{"delta": {"content": "r</think>done"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "length"}]},
+            {"choices": [], "usage": usage},
+        ]
+        with patch("requests.post", return_value=_sse_response(chunks)):
+            result = CliRunner().invoke(cli, ["--json", "stream", "q"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["content"] == "done"
+        assert data["finish_reason"] == "length"
+        assert data["usage"] == usage
+        assert ChatSession(str(backend.get_home_dir() / "session.json")).messages[-1]["content"] == "done"

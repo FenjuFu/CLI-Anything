@@ -10,12 +10,15 @@ from pathlib import Path
 
 def _locked_save_json(path, data, **dump_kwargs) -> None:
     """Write JSON with an exclusive file lock where the platform supports it."""
-    try:
-        f = open(path, "r+", encoding="utf-8")
-    except FileNotFoundError:
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        f = open(path, "w", encoding="utf-8")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    f = os.fdopen(fd, "r+", encoding="utf-8")
     with f:
+        # Creation mode is atomic on POSIX; restrict pre-existing sessions too.
+        if hasattr(os, "fchmod"):
+            os.fchmod(f.fileno(), 0o600)
+        else:
+            os.chmod(path, 0o600)
         _locked = False
         try:
             import fcntl

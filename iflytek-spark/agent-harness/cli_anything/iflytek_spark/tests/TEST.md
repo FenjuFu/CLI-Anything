@@ -9,12 +9,12 @@ temporary `IFLYTEK_SPARK_HOME`.
 
 | Area | What is checked |
 |------|-----------------|
-| Settings | Backend presets, unknown backend, precedence (option > env > config > preset), trailing-slash handling, config round-trip, secret masking |
+| Settings | Backend presets, unknown backend, precedence (option > env > config > preset), trailing-slash handling, config round-trip, non-object JSON treated as empty config, secret masking |
 | Reasoning split | `reasoning_content` field, Ollama `reasoning` field, pre-filled `<think>` (only `</think>` in content), full `<think>…</think>` block, no reasoning, `null` content |
 | Stream splitter | `</think>` split across chunks, stream without a close tag, pass-through mode, server-side reasoning deltas releasing the buffer |
 | Requests | `--no-think` → `chat_template_kwargs.enable_thinking=false`, sampling params, Bearer header only when a key is set, HTTP error and connection error mapping, model auto-detect from `/models` |
-| Streaming | SSE with `reasoning_content` deltas, SSE with inline `</think>`, pass-through with thinking disabled |
-| Session | Persistence of exchanges (UTF-8), turn count, clear |
+| Streaming | SSE with `reasoning_content` deltas, SSE with inline `</think>` even if a no-think request is ignored, direct no-think answers, final finish reason and empty-choices usage chunk |
+| Session | Persistence of exchanges (UTF-8), turn count, clear, restrictive creation mode and tightening an existing session |
 | CLI | `--help`, `backends --json`, `chat --json --show-reasoning`, multi-turn history sent to the server, `--no-session`, stdin prompt, empty prompt error, global options reaching the request, JSON error on connection failure, `models --json`, config masking and validation, `stream --json` |
 
 ### E2E tests (`test_full_e2e.py`)
@@ -32,7 +32,28 @@ All tests run the installed `cli-anything-iflytek-spark` command through
 Point the live tests at a server with the usual settings, e.g.
 `IFLYTEK_SPARK_BACKEND=llamacpp` or `IFLYTEK_SPARK_BASE_URL=http://host:30000/v1`.
 
-## Test results
+## Review-fix verification (2026-10-22)
+
+Windows, Python 3.12.6; HTTP mocked for the unit suite. No model server or
+service credentials were used. All dummy fixtures were retained locally.
+
+```text
+Original head 7a6d454, original unit tests: 41 passed
+Original head, new regression suite:     11 failed, 40 passed, 2 skipped
+Fixed code, complete unit suite:          51 passed, 2 skipped
+Fixed code, CLI subprocess suite:         4 passed, 7 skipped
+```
+
+The two unit skips are actual POSIX mode assertions on Windows; the owner-only
+creation/chmod calls are checked locally, but real POSIX permissions await a
+POSIX run. The seven CLI skips require a live model server. The four passing
+CLI tests used `python -m cli_anything.iflytek_spark`, not a newly installed
+entry point. The old-head failures cover non-object configuration, terminal
+stream metadata, ignored no-think normalization, session restrictions and JSON
+stream metadata. These results do not rerun the historical model tests below
+or validate every supported provider.
+
+## Historical test results (before the review fixes)
 
 Environment: Windows 11, Python 3.11, official `Spark-X2.5-1.7B-Q4_K_M.gguf`
 (ModelScope, sha256 `902bde25…0503f4`) on llama.cpp `llama-server` b11256 (CPU).

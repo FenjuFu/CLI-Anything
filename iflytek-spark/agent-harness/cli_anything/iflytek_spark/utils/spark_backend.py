@@ -88,7 +88,8 @@ def load_config() -> dict:
         return {}
     try:
         with open(config_file, "r", encoding="utf-8") as f:
-            return json.load(f)
+            config = json.load(f)
+        return config if isinstance(config, dict) else {}
     except (json.JSONDecodeError, IOError):
         return {}
 
@@ -288,6 +289,7 @@ def build_request(
         body["chat_template_kwargs"] = {"enable_thinking": False}
     if stream:
         body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
     return body
 
 
@@ -343,9 +345,13 @@ def chat_completion_stream(
     """Streaming chat. Calls the callbacks as text arrives."""
     model = resolve_model(settings)
     body = build_request(model, messages, temperature, top_p, max_tokens, thinking, stream=True)
-    splitter = ThinkStreamSplitter(passthrough=not thinking)
+    # --no-think is a request, not proof that the server obeyed it.
+    splitter = ThinkStreamSplitter()
     reasoning_parts: list[str] = []
     content_parts: list[str] = []
+    response_model = model
+    finish_reason = None
+    usage = {}
 
     def dispatch(events):
         for kind, text in events:
@@ -382,7 +388,13 @@ def chat_completion_stream(
                 chunk = json.loads(payload)
             except json.JSONDecodeError:
                 continue
+            if chunk.get("model"):
+                response_model = chunk["model"]
+            if isinstance(chunk.get("usage"), dict):
+                usage = chunk["usage"]
             choices = chunk.get("choices") or [{}]
+            if choices[0].get("finish_reason") is not None:
+                finish_reason = choices[0]["finish_reason"]
             delta = choices[0].get("delta", {})
             think = delta.get("reasoning_content") or delta.get("reasoning")
             if think:
@@ -397,7 +409,9 @@ def chat_completion_stream(
         raise _http_error(resp, e)
 
     return {
-        "model": model,
+        "model": response_model,
         "reasoning": "".join(reasoning_parts).strip(),
         "content": "".join(content_parts).strip(),
+        "finish_reason": finish_reason,
+        "usage": usage,
     }

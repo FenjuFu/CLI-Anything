@@ -62,6 +62,10 @@ variable > config file > backend preset.
 Config and session files live in `~/.cli-anything-iflytek-spark/`
 (override with `IFLYTEK_SPARK_HOME`).
 
+Session files are created with mode `0600` on POSIX, and existing sessions are
+restricted before another exchange is written. Windows mode bits do not replace
+Windows ACLs; keep the configured home in a location private to your account.
+
 ## Reasoning output
 
 Spark-X2.5 thinks by default, and its chat template pre-fills `<think>` into the
@@ -76,6 +80,11 @@ prompt. How the reasoning comes back depends on the server:
 The CLI handles both. `content` is always only the final answer, and
 `--show-reasoning` adds the reasoning separately. Only final answers are kept
 in the multi-turn session.
+
+`--no-think` requests that the backend disable thinking, but normalization still
+handles a backend that returns inline reasoning anyway. Streaming requests ask
+for usage metadata; `stream --json` includes `finish_reason` and `usage` when the
+server supplies them, including usage in a final chunk with no choices.
 
 ## Commands
 
@@ -101,3 +110,8 @@ pip install -e .
 python -m pytest cli_anything/iflytek_spark/tests/test_core.py -v      # no server needed
 python -m pytest cli_anything/iflytek_spark/tests/test_full_e2e.py -v  # needs a live server
 ```
+
+The unit suite collects 53 cases, including two POSIX file-mode checks that skip
+on Windows. The E2E file contains four offline CLI subprocess cases and seven
+live-backend cases. Running the offline cases does not verify model inference
+or a remote provider; use a real server for the complete E2E run.
